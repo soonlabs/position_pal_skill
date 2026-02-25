@@ -49,6 +49,8 @@ Triggers a full synchronous analysis. Blocks until complete.
 }
 ```
 
+**Presenting the result:** The report has many fields. See **[How to use and present the analyze report](#how-to-use-and-present-the-analyze-report)** for what to show first (overall risk → summary → recommendations) and how to format it for users.
+
 **curl example**
 
 ```bash
@@ -244,6 +246,12 @@ curl -s -X POST "${BASE_URL}/api/portfolio" \
 - Use `/api/portfolio` for fast live balances and P&L (no risk scores, no indicators)
 - Use `/api/analyze` when you need risk scores, RSI/OI indicators, and recommendations
 
+**Data consistency (important for agents):**  
+`POST /api/portfolio` and the `report.account_summary` inside `POST /api/analyze` are **the same data source**. Both are built from one portfolio snapshot. So:
+- `summary.total_assets_usd` (portfolio) **equals** `report.account_summary.total_assets_usd` (analyze).
+- `report.account_summary.top_holdings` is the same breakdown as portfolio’s `spot` + `futures` (top 5 by value).
+- If you call both endpoints with the same credentials, totals and allocations must match. Prefer **one** of them for “current holdings and total value”: either use `/api/portfolio` for a quick snapshot, or use `report.account_summary` when you already have an analysis report. Do not treat them as two different “sources of truth” or report conflicting numbers.
+
 ---
 
 ### 5. POST /api/check — Threshold Alert
@@ -387,17 +395,19 @@ await chat("What would happen if BTC drops 20%?");
 
 ### `AccountSummary`
 
+**Same data as `POST /api/portfolio`:** totals and holdings come from the same snapshot. Use this when you already have a report; use `/api/portfolio` when you only need balances.
+
 ```typescript
 {
-  total_assets_usd: number;
+  total_assets_usd: number;   // same as portfolio summary.total_assets_usd
   spot_value_usd: number;
   futures_value_usd: number;
   position_count: number;
   top_holdings: {
-    symbol: string;
+    symbol: string;           // asset (spot) or symbol (futures), e.g. "BTC", "USDT"
     value_usd: number;
-    allocation: number;  // 0-100
-  }[];                    // top 5 by value
+    allocation: number;       // 0-100, share of total_assets_usd
+  }[];                        // top 5 by value (spot + futures combined)
 }
 ```
 
@@ -467,6 +477,54 @@ One entry per asset. Sorted highest risk first.
 ```
 
 **Overall level thresholds:** safe ≤30 / cautious ≤60 / risky ≤80 / dangerous >80
+
+---
+
+## How to use and present the analyze report
+
+The analyze response is large. Use the following guidance so users get a clear, scannable summary instead of a data dump.
+
+### 1. What to show, in order
+
+| Priority | Source | What to show |
+|----------|--------|----------------|
+| **First** | `report.overall_risk` | One line: level + score. Example: *"Portfolio risk: **cautious** (score 42)."* |
+| **Second** | `report.account_summary` | One line: total value + top 1–2 holdings. Example: *"Total **$12,450** — BTC 65%, ETH 22%."* |
+| **Third** | `report.overall_risk.risk_factors` | Only if non-empty: *"Focus: BTC score 74, ETH score 61."* |
+| **Fourth** | `report.recommendations` | Always show: 1–3 short bullets. |
+| **Optional** | `report.positions` | Top 3–5 by risk (e.g. `positions.slice(0, 5)`). Do not dump all positions unless the user asks for a full list. |
+| **Optional** | `report.macro_analysis` | One line if present: *"Market: Fear & Greed 35 (Fear), BTC trend sideways."* |
+
+### 2. Quick summary template
+
+After calling `/api/analyze`, you can answer “How is my portfolio?” with:
+
+- **Headline:** `overall_risk.level` + `overall_risk.overall_score`.
+- **Portfolio:** `account_summary.total_assets_usd` (format as USD) and top 1–2 from `account_summary.top_holdings` (symbol + allocation %).
+- **If any risk_factors:** list them in one line.
+- **Actions:** `recommendations[]` as short bullets.
+
+Example: *"Risk is **cautious** (42). Portfolio **$12,450** — BTC 65%, ETH 22%. Watch: BTC score 74. Recommendations: Monitor BTC closely; consider reducing if volatility rises."*
+
+### 3. When to show more detail
+
+- **Per-position detail:** Use `positions[i]` only for the **top 3–5 by risk** (array is already sorted by `risk_score`). For each, show: symbol, side, risk_level, value_usd, and optionally `analysis` (one sentence). Skip raw `indicators` unless the user asks for RSI/funding/volatility.
+- **Macro:** Show `macro_analysis` in one line (fear_greed_label, btc_trend, funding_rate_status). Omit if `portfolio_only: true` (then `macro_analysis` is null).
+- **Full report:** Only dump all positions and all fields when the user explicitly asks for “full details” or “every position.”
+
+### 4. Formatting
+
+- **Money:** `value_usd` → `$1,234.56` (two decimals; optional thousands separator).
+- **Percent:** `allocation`, `allocation_percent` → `65.5%` (one or two decimals).
+- **Risk:** Prefer the **level** label (`safe` / `cautious` / `risky` / `dangerous`; or for positions `low` / `medium` / `high` / `critical`) over the raw score when talking to the user; show score in parentheses when relevant (e.g. “high (74)”).
+- **Lists:** Use bullets or a short table; avoid long paragraphs of numbers.
+
+### 5. What not to do
+
+- Do not return the raw JSON.
+- Do not list every position by default — summarize with top holdings and top risks.
+- Do not show `report_id`, `generated_at`, or internal fields unless the user asks (e.g. for caching or debugging).
+- Do not repeat the same numbers from both `account_summary` and a full position list; pick one (prefer `account_summary` for totals and allocation).
 
 ---
 
